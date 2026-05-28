@@ -108,7 +108,7 @@
 	  </None>
 	</ItemGroup>
 
-  <Target Name="CopyCustomContent" AfterTargets="AfterBuild" Condition="$(DefineConstants.Contains('ASCOM_COM'))">
+  <Target Name="CopyCustomContent" AfterTargets="AfterBuild" Condition="$(DefineConstants.Contains('ASCOM_COM')) And Exists('..\OmniSimCOMProxy\bin\$(Configuration)\net48\OmniSim.COMProxy.exe')">
     <Copy SourceFiles="..\OmniSimCOMProxy\bin\$(Configuration)\net48\OmniSim.COMProxy.exe" DestinationFolder="$(OutDir)\COM" />
   </Target>
 
