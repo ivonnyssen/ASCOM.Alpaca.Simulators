@@ -270,6 +270,19 @@ namespace ASCOM.Simulators
         private static TrackingMode trackingMode;
         private static bool slewing;
 
+        /// <summary>
+        /// Synchronises access to the slew-engine state shared between the Kestrel
+        /// HTTP request threads (StartSlewAxes / SyncTo* / AbortSlew / Slewing / RA /
+        /// Dec) and the s_wTimer tick thread (MoveAxes -> DoSlew). Upstream OmniSim
+        /// leaves mountAxes, targetAxes, slewing and SlewState as plain unsynchronised
+        /// static fields, so StartSlewAxes' writes are not ordered against the timer
+        /// thread's reads: the tick can observe SlewState == SlewRaDec while still
+        /// seeing slewing == false, bail out of DoSlew, and never advance the slew, so
+        /// IsSlewing stays true indefinitely. Taking this lock on both sides restores
+        /// that ordering. See rusty-photon issue #326.
+        /// </summary>
+        private static readonly object hardwareLock = new object();
+
         private static DateTime lastUpdateTime;
 
         #endregion Private variables
@@ -680,7 +693,16 @@ namespace ASCOM.Simulators
         //Update the Telescope Based on Timed Events
         private static void M_wTimer_Tick(object sender, EventArgs e)
         {
-            MoveAxes();
+            // Hold hardwareLock for the entire tick so MoveAxes / DoSlew see a
+            // consistent, ordered view of the slew state that HTTP request threads
+            // mutate (StartSlewAxes / AbortSlew / SyncTo*). MoveAxes is only ever
+            // called from here, so this also serialises any reentrant tick that
+            // System.Timers.Timer (AutoReset = true) fires on a second ThreadPool
+            // thread when a tick overruns TIMER_INTERVAL. See rusty-photon issue #326.
+            lock (hardwareLock)
+            {
+                MoveAxes();
+            }
         }
 
         /// <summary>
@@ -1427,14 +1449,14 @@ namespace ASCOM.Simulators
 
         public static double Declination
         {
-            get { return currentRaDec.Y; }
-            set { currentRaDec.Y = value; }
+            get { lock (hardwareLock) { return currentRaDec.Y; } }
+            set { lock (hardwareLock) { currentRaDec.Y = value; } }
         }
 
         public static double RightAscension
         {
-            get { return currentRaDec.X; }
-            set { currentRaDec.X = value; }
+            get { lock (hardwareLock) { return currentRaDec.X; } }
+            set { lock (hardwareLock) { currentRaDec.X = value; } }
         }
 
         public static SlewType SlewState { get; private set; }
@@ -1591,36 +1613,48 @@ namespace ASCOM.Simulators
         {
             get
             {
-                if (SlewState != SlewType.SlewNone)
-                    return true;
-                if (slewing)
-                    return true;
-                if (rateMoveAxes.LengthSquared != 0)
-                    return true;
-                //if (rateRaDec.LengthSquared != 0) // Commented out by Peter 4th August 2018 because the Telescope specification says that RightAscensionRate and DeclinationRate do not affect the Slewing state
-                //    return true;
-                return slewing && rateMoveAxes.Y != 0 && rateMoveAxes.X != 0;
+                lock (hardwareLock)
+                {
+                    if (SlewState != SlewType.SlewNone)
+                        return true;
+                    if (slewing)
+                        return true;
+                    if (rateMoveAxes.LengthSquared != 0)
+                        return true;
+                    //if (rateRaDec.LengthSquared != 0) // Commented out by Peter 4th August 2018 because the Telescope specification says that RightAscensionRate and DeclinationRate do not affect the Slewing state
+                    //    return true;
+                    return slewing && rateMoveAxes.Y != 0 && rateMoveAxes.X != 0;
+                }
             }
         }
 
         public static void AbortSlew()
         {
-            slewing = false;
-            rateMoveAxes = new Vector();
-            rateRaDecOffsetInternal = new Vector();
-            SlewState = SlewType.SlewNone;
+            lock (hardwareLock)
+            {
+                slewing = false;
+                rateMoveAxes = new Vector();
+                rateRaDecOffsetInternal = new Vector();
+                SlewState = SlewType.SlewNone;
+            }
         }
 
         public static void SyncToTarget()
         {
-            mountAxes = MountFunctions.ConvertRaDecToAxes(targetRaDec, true);
-            UpdatePositions();
+            lock (hardwareLock)
+            {
+                mountAxes = MountFunctions.ConvertRaDecToAxes(targetRaDec, true);
+                UpdatePositions();
+            }
         }
 
         public static void SyncToAltAzm(double targetAzimuth, double targetAltitude)
         {
-            mountAxes = MountFunctions.ConvertAltAzmToAxes(new Vector(targetAzimuth, targetAltitude));
-            UpdatePositions();
+            lock (hardwareLock)
+            {
+                mountAxes = MountFunctions.ConvertAltAzmToAxes(new Vector(targetAzimuth, targetAltitude));
+                UpdatePositions();
+            }
         }
 
         public static void StartSlewRaDec(double rightAscension, double declination, bool doSideOfPier)
@@ -1661,10 +1695,17 @@ namespace ASCOM.Simulators
         /// <param name="targetPosition">The position.</param>
         public static void StartSlewAxes(Vector targetPosition, SlewType slewState)
         {
-            targetAxes = targetPosition;
-            SlewState = slewState;
-            slewing = true;
-            ChangePark(false);
+            // Order these writes against the timer thread's reads in DoSlew. Without
+            // the lock the tick can see slewing == false (stale) after SlewState has
+            // already become SlewRaDec, bail out of DoSlew, and wedge IsSlewing at
+            // true forever (rusty-photon issue #326).
+            lock (hardwareLock)
+            {
+                targetAxes = targetPosition;
+                SlewState = slewState;
+                slewing = true;
+                ChangePark(false);
+            }
         }
 
         public static void Park()
