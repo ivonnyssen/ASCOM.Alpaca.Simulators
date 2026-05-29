@@ -1300,7 +1300,24 @@ namespace ASCOM.Simulators
             set { altAzm.Y = value; }
         }
 
-        public static bool AtPark { get; private set; }
+        private static bool atPark;
+
+        /// <summary>
+        /// `true` once a park slew has completed. Written by <see cref="ChangePark"/>
+        /// — from the timer-tick completion path and from StartSlewAxes, both of
+        /// which hold <c>hardwareLock</c> — and read by the Alpaca `AtPark` poller
+        /// on a Kestrel request thread. The lock orders the tick's write against the
+        /// poller's read; without it a client polling `AtPark` right after `Park()`
+        /// can miss the completion on weak memory (AArch64) / under JIT register
+        /// caching and spin until its own deadline. Same race class as the
+        /// IsSlewing / RightAscension / Declination accessors fixed for issue #326;
+        /// this closes the park-side gap (rusty-photon coverage rp:bdd hang).
+        /// </summary>
+        public static bool AtPark
+        {
+            get { lock (hardwareLock) { return atPark; } }
+            private set { lock (hardwareLock) { atPark = value; } }
+        }
 
         public static double Azimuth
         {
@@ -1459,7 +1476,21 @@ namespace ASCOM.Simulators
             set { lock (hardwareLock) { currentRaDec.X = value; } }
         }
 
-        public static SlewType SlewState { get; private set; }
+        private static SlewType slewStateField;
+
+        /// <summary>
+        /// The slew-engine state. Written under <c>hardwareLock</c> (timer tick,
+        /// StartSlewAxes, AbortSlew) and also read off the hardware thread — e.g.
+        /// `Telescope.cs` traffic logging reads it directly — so the accessor takes
+        /// the same lock for a consistent cross-thread view. (`private set` keeps
+        /// the writer internal; the lock is reentrant, so the tick writing it while
+        /// already holding the lock is fine.)
+        /// </summary>
+        public static SlewType SlewState
+        {
+            get { lock (hardwareLock) { return slewStateField; } }
+            private set { lock (hardwareLock) { slewStateField = value; } }
+        }
 
         public static SlewSpeed SlewSpeed { get; set; }
 
