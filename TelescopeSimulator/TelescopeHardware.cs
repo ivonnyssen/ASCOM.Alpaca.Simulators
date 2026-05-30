@@ -370,6 +370,21 @@ namespace ASCOM.Simulators
         {
             try
             {
+                // Dispose the previously-created timer before allocating a new
+                // one. Init() runs on every Telescope (re)construction — including
+                // the simulator "restart to a clean state" reset the rusty-photon
+                // BDD harness issues per scenario. Without this the prior
+                // AutoReset timer is never stopped/unsubscribed; the runtime keeps
+                // it alive and it keeps firing M_wTimer_Tick on the shared static
+                // slew state, so every reset leaked another tick source racing the
+                // single slew engine. (rusty-photon #326 follow-up.)
+                if (s_wTimer != null)
+                {
+                    s_wTimer.Stop();
+                    s_wTimer.Elapsed -= M_wTimer_Tick;
+                    s_wTimer.Dispose();
+                }
+
                 s_wTimer = new System.Timers.Timer();
                 s_wTimer.Interval = (int)(SharedResources.TIMER_INTERVAL * 1000);
                 s_wTimer.Elapsed += M_wTimer_Tick;
@@ -643,11 +658,21 @@ namespace ASCOM.Simulators
                 SlewSettleTime = 0;
                 ChangePark(AtPark);
 
-                // invalid target position
-                targetRaDec = new Vector(double.NaN, double.NaN);
-                SlewState = SlewType.SlewNone;
+                // Reset the slew-engine state under hardwareLock so these writes
+                // are ordered against any still-in-flight M_wTimer_Tick (issue
+                // #326). `slewing` in particular was never cleared on reset, so a
+                // slew left in flight by a prior Telescope instance could keep
+                // IsSlewing stuck true after a "restart to clean state".
+                lock (hardwareLock)
+                {
+                    // invalid target position
+                    targetRaDec = new Vector(double.NaN, double.NaN);
+                    SlewState = SlewType.SlewNone;
+                    slewing = false;
+                    rateMoveAxes = new Vector();
 
-                mountAxes = MountFunctions.ConvertAltAzmToAxes(altAzm); // Convert the start position AltAz coordinates into the current axes representation and set this as the simulator start position
+                    mountAxes = MountFunctions.ConvertAltAzmToAxes(altAzm); // Convert the start position AltAz coordinates into the current axes representation and set this as the simulator start position
+                }
                 LogMessage("TelescopeHardware New", string.Format("Startup mode: {0}, Azimuth: {1}, Altitude: {2}", startupMode, altAzm.X.ToString(CultureInfo.InvariantCulture), altAzm.Y.ToString(CultureInfo.InvariantCulture)));
 
                 LogMessage("TelescopeHardware New", "Successfully initialised hardware");
