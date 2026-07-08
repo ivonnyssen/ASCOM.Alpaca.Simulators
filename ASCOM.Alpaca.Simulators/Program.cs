@@ -28,6 +28,21 @@ namespace ASCOM.Alpaca.Simulators
 
         public static void Main(string[] args)
         {
+            // --multi-instance: opt out of the machine-global single-instance
+            // guard (the named mutex below and the named-pipe command server)
+            // so that test harnesses can run several OmniSims concurrently,
+            // each bound to its own port via --urls. Each instance should also
+            // get its own settings store (e.g. a distinct XDG_CONFIG_HOME on
+            // Linux/macOS) — the settings write-back is not synchronised
+            // between instances. The flag is stripped here so it never reaches
+            // the ASP.NET host builder, which would otherwise try to interpret
+            // it as a configuration key expecting a value.
+            bool multiInstance = args?.Any(str => str.Contains("--multi-instance")) ?? false;
+            if (multiInstance)
+            {
+                args = args.Where(str => !str.Contains("--multi-instance")).ToArray();
+            }
+
             // Unique ID for global mutex - Global prefix means it is global to the machine
             string mutexId = string.Format("Global\\{{{0}}}", ApplicationGUID);
 
@@ -39,7 +54,10 @@ namespace ASCOM.Alpaca.Simulators
                     try
                     {
                         //Time out fast, this is just to check if a copy is already running
-                        hasHandle = mutex.WaitOne(10, false);
+                        //In multi-instance mode skip the check entirely: never take the
+                        //mutex, and proceed as the "first copy" regardless of other
+                        //running instances.
+                        hasHandle = multiInstance || mutex.WaitOne(10, false);
 
                         //This is the second copy to start, either it will process an argument itself or it will pass the command to the running copy
                         if (hasHandle == false)
@@ -96,6 +114,12 @@ namespace ASCOM.Alpaca.Simulators
                     //This is the first copy to start. It will start the Alpaca service and any other functions. This task listens for external commands
                     Task.Factory.StartNew(() =>
                     {
+                        if (multiInstance)
+                        {
+                            //The pipe name is machine-global like the mutex; concurrent
+                            //multi-instance processes must not bind it.
+                            return;
+                        }
                         var server = new NamedPipeServerStream(PipeGUID);
                         server.WaitForConnection();
                         StreamReader reader = new StreamReader(server);
@@ -196,7 +220,9 @@ namespace ASCOM.Alpaca.Simulators
                 }
                 finally
                 {
-                    if (hasHandle)
+                    //In multi-instance mode the mutex was never acquired (hasHandle was
+                    //forced true without WaitOne), so releasing it would throw.
+                    if (hasHandle && !multiInstance)
                         mutex.ReleaseMutex();
                 }
             }
