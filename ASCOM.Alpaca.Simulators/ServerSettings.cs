@@ -123,7 +123,55 @@ namespace ASCOM.Alpaca.Simulators
             }
         }
 
-        private static readonly XMLProfile Profile = new XMLProfile(SettingsFolderName, ServerFolderName);
+        // rusty-photon #467: optional override of the profile-store root. When
+        // the OMNISIM_SETTINGS_DIR environment variable is set, every profile
+        // (server + devices) lives under
+        //   <dir>/<SettingsFolderName>/<deviceType>/v1/<instance>-<n>.xml
+        // — the exact layout XMLProfile itself uses (platform casing and all),
+        // just re-rooted. Nothing else changes. The default location cannot be
+        // redirected by any environment variable on Windows
+        // (%USERPROFILE%\.ASCOM\Alpaca via SHGetKnownFolderPath) or macOS
+        // (~/Library/Application Support via NSSearchPath — XDG_CONFIG_HOME is
+        // honored on other Unixes only), so test harnesses running several
+        // --multi-instance OmniSims concurrently use this to give each
+        // instance its own settings store.
+        internal static string SettingsDirOverride =>
+            Environment.GetEnvironmentVariable("OMNISIM_SETTINGS_DIR");
+
+        // Mirrors XMLProfile's private FileName platform switch.
+        private static string ProfileFileName
+        {
+            get
+            {
+                if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                {
+                    return "Instance";
+                }
+                else
+                {
+                    return "instance";
+                }
+            }
+        }
+
+        // Build the profile for a device type, honoring OMNISIM_SETTINGS_DIR.
+        // All XMLProfile construction in the simulator goes through here.
+        internal static XMLProfile CreateProfile(string deviceType, uint deviceNumber = 0)
+        {
+            var root = SettingsDirOverride;
+            if (string.IsNullOrWhiteSpace(root))
+            {
+                return new XMLProfile(SettingsFolderName, deviceType, deviceNumber);
+            }
+            return new XMLProfile(System.IO.Path.Combine(
+                root,
+                SettingsFolderName,
+                deviceType,
+                "v1",
+                $"{ProfileFileName}-{deviceNumber}.xml"));
+        }
+
+        private static readonly XMLProfile Profile = CreateProfile(ServerFolderName);
 
         internal static void Reset()
         {
@@ -656,7 +704,10 @@ namespace ASCOM.Alpaca.Simulators
         {
             get
             {
-                var path = System.IO.Path.Combine(XMLProfile.AlpacaDataPath, SettingsFolderName, "UnsafeAutoSSL.pfx");
+                var root = string.IsNullOrWhiteSpace(SettingsDirOverride)
+                    ? XMLProfile.AlpacaDataPath
+                    : SettingsDirOverride;
+                var path = System.IO.Path.Combine(root, SettingsFolderName, "UnsafeAutoSSL.pfx");
                 return Profile.GetValue("SSLCertPath", path);
             }
             set
