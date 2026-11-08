@@ -29,9 +29,10 @@ namespace ASCOM.Alpaca.Simulators
         public static void Main(string[] args)
         {
             // --multi-instance: opt out of the machine-global single-instance
-            // guard (the named mutex below and the named-pipe command server)
-            // so that test harnesses can run several OmniSims concurrently,
-            // each bound to its own port via --urls. Each instance should also
+            // guard (the named mutex below and the named-pipe command server),
+            // and of the Windows tray icon, so that test harnesses can run
+            // several OmniSims concurrently, each bound to its own port via
+            // --urls. Each instance should also
             // get its own settings store (e.g. a distinct XDG_CONFIG_HOME on
             // Linux/macOS) — the settings write-back is not synchronised
             // between instances. The flag is stripped here so it never reaches
@@ -167,9 +168,18 @@ namespace ASCOM.Alpaca.Simulators
                     TrayIconWithContextMenu trayIcon;
 
                     // Show the tray icon
+                    //In multi-instance mode skip it: its identity is machine-global
+                    //like the mutex and the pipe. H.NotifyIcon keys the icon on a
+                    //hash of the process path, so every instance started from one
+                    //binary shares it, and each one's Create() deletes, re-adds and
+                    //re-versions that one icon. Two instances starting together
+                    //interleave those calls, and the loser throws "TryCreate failed"
+                    //or "TrySetMostRecentVersion failed" on H.NotifyIcon's own
+                    //thread, where the catch below never sees it, so the process
+                    //dies. A session with no desktop fails TryCreate every time.
                     try
                     {
-                        if (OperatingSystem.IsWindowsVersionAtLeast(10, 0, 0, 0))
+                        if (!multiInstance && OperatingSystem.IsWindowsVersionAtLeast(10, 0, 0, 0))
                         {
                             var icon = Icon.ExtractAssociatedIcon(System.Environment.ProcessPath);
                             trayIcon = new TrayIconWithContextMenu
